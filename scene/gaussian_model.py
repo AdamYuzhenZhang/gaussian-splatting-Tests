@@ -21,6 +21,9 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+# New
+from .mode import TrainingMode
+# New End
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -63,6 +66,14 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+
+        # New
+        self.scale_control = 0.0
+        self.procedural = False
+        self.mode = TrainingMode.DEFAULT
+        self.max_splats = -1
+        # New end
+
         self.setup_functions()
 
     def capture(self):
@@ -101,7 +112,18 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        # return self.scaling_activation(self._scaling)
+        # New
+        if self.scale_control == 0.0:
+            return self.scaling_activation(self._scaling)
+        # Make splats spherical
+        scale = self.scaling_activation(self._scaling)
+        mean_scale = scale.mean(dim=1, keepdim=True)
+        sphere_scale = mean_scale.repeat(1, 3)
+
+        interpolated_scale = (1.0 - self.scale_control) * scale + self.scale_control * sphere_scale
+        return interpolated_scale
+        # New End
     
     @property
     def get_rotation(self):
@@ -158,6 +180,7 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
@@ -408,6 +431,11 @@ class GaussianModel:
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
+        # New
+        if self.max_splats != -1 and n_init_points >= self.max_splats:
+            return  # stop splitting after reaching max splats
+        # New End
+
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
@@ -421,11 +449,26 @@ class GaussianModel:
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+ 
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
+
+        # New
+        # Do not add to many splats
+        """ num_new_splats = new_xyz.shape[0]
+        if self.max_splats != -1 and n_init_points + num_new_splats > self.max_splats:
+            num_new_splats = self.max_splats - n_init_points  # Limit the number of new splats
+            new_xyz = new_xyz[:num_new_splats]
+            new_scaling = new_scaling[:num_new_splats]
+            new_rotation = new_rotation[:num_new_splats]
+            new_features_dc = new_features_dc[:num_new_splats]
+            new_features_rest = new_features_rest[:num_new_splats]
+            new_opacity = new_opacity[:num_new_splats]
+            new_tmp_radii = new_tmp_radii[:num_new_splats] """
+        # New End
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
 
@@ -433,6 +476,12 @@ class GaussianModel:
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
+        # New
+        n_init_points = self.get_xyz.shape[0]
+        if self.max_splats != -1 and n_init_points >= self.max_splats:
+            return  # stop splitting after reaching max splats
+        # New End
+
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
@@ -443,9 +492,24 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
+    
         new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
+
+        # New
+        # Do not add to many splats
+        """ num_new_splats = new_xyz.shape[0]
+        if self.max_splats != -1 and n_init_points + num_new_splats > self.max_splats:
+            num_new_splats = self.max_splats - n_init_points  # Limit the number of new splats
+            new_xyz = new_xyz[:num_new_splats]
+            new_scaling = new_scaling[:num_new_splats]
+            new_rotation = new_rotation[:num_new_splats]
+            new_features_dc = new_features_dc[:num_new_splats]
+            new_features_rest = new_features_rest[:num_new_splats]
+            new_opacity = new_opacity[:num_new_splats]
+            new_tmp_radii = new_tmp_radii[:num_new_splats] """
+        # New End
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
@@ -456,6 +520,7 @@ class GaussianModel:
         self.tmp_radii = radii
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
+        
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
