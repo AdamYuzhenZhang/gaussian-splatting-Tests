@@ -72,6 +72,7 @@ class GaussianModel:
         self.procedural = False
         self.mode = TrainingMode.DEFAULT
         self.max_splats = -1
+        self.saturation = 1.0
         # New end
 
         self.setup_functions()
@@ -270,6 +271,18 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
+        # New
+        # Extract RGB channels
+        rgb = f_dc[:, :3]  # Assuming f_dc contains (R, G, B) in the first three channels
+        # Convert RGB to grayscale by averaging the channels
+        grayscale = np.mean(rgb, axis=1, keepdims=True)  # Shape: (N, 1)
+        grayscale_rgb = np.repeat(grayscale, 3, axis=1)  # Convert to (N, 3) for RGB format
+        # Interpolate between grayscale and full color
+        adjusted_rgb = (1 - self.saturation) * grayscale_rgb + self.saturation * rgb
+        # Update f_dc with adjusted colors
+        f_dc[:, :3] = adjusted_rgb
+        # New End
+
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
@@ -432,8 +445,8 @@ class GaussianModel:
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # New
-        if self.max_splats != -1 and n_init_points >= self.max_splats:
-            return  # stop splitting after reaching max splats
+        #if self.max_splats != -1 and n_init_points >= self.max_splats:
+        #    return  # stop splitting after reaching max splats
         # New End
 
         # Extract points that satisfy the gradient condition
@@ -477,9 +490,9 @@ class GaussianModel:
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # New
-        n_init_points = self.get_xyz.shape[0]
-        if self.max_splats != -1 and n_init_points >= self.max_splats:
-            return  # stop splitting after reaching max splats
+        #n_init_points = self.get_xyz.shape[0]
+        #if self.max_splats != -1 and n_init_points >= self.max_splats:
+        #    return  # stop splitting after reaching max splats
         # New End
 
         # Extract points that satisfy the gradient condition
@@ -518,8 +531,10 @@ class GaussianModel:
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        # New
+        if self.max_splats == -1 or self.get_xyz.shape[0] < self.max_splats:
+            self.densify_and_clone(grads, max_grad, extent)
+            self.densify_and_split(grads, max_grad, extent)
         
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()

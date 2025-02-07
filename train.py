@@ -56,6 +56,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.scale_control = args.scale_control
     gaussians.procedural = args.procedural
     gaussians.max_splats = args.max_splats
+    gaussians.saturation = args.saturation
     # New end
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -147,6 +148,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
+
+        '''
+        print("Shape of image:", image.shape)
+        print("Shape of gt_image:", gt_image.shape)
+        print("Shape of viewspace_point_tensor:", viewspace_point_tensor.shape)
+        print("Shape of visibility_filter:", visibility_filter.shape)
+        print("Shape of radii:", radii.shape)
+        '''
 
         loss.backward()
 
@@ -267,12 +276,13 @@ def training_procedural(dataset, opt, pipe, testing_iterations, saving_iteration
             gaussians.oneupSHdegree()
 
         # Procedural workflow for generating GS
-        if iteration <= 1000:  
+        if iteration <= 3500:  
             # Do planner for the first 1000 iterations
             gaussians.mode = TrainingMode.PLANNER
             # Use the first camera only
-            viewpoint_cam = scene.getTrainCameras()[0]
+            viewpoint_cam = scene.getTrainCameras()[1]
         else:
+            gaussians.mode = TrainingMode.DEFAULT
             # Pick a random Camera
             if not viewpoint_stack:
                 viewpoint_stack = scene.getTrainCameras().copy()
@@ -474,8 +484,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[2_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[2_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[6_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[6_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
@@ -487,6 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--scale_control", type=float, default=0.0)
     # max number of splats
     parser.add_argument("--max_splats", type=int, default=-1)
+    parser.add_argument("--saturation", type=float, default=1.0)
     # New End
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -497,8 +508,8 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    if not args.disable_viewer:
-        network_gui.init(args.ip, args.port)
+    #if not args.disable_viewer:
+   #    network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     # New
     if args.procedural:
